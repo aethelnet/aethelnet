@@ -28,6 +28,9 @@ class LiquidGraph(nn.Module):
         # Mapping from node_id -> node_embedding (torch parameter)
         self.nodes = nn.ParameterDict()
         
+        self._id_map: Dict[str, str] = {}
+        self._safe_map: Dict[str, str] = {}
+        
         # Persona definitions: persona_name -> list of node_ids
         self.personas: Dict[str, List[str]] = {}
         # Active status: persona_name -> boolean
@@ -53,10 +56,16 @@ class LiquidGraph(nn.Module):
 
     def _safe_id(self, node_id: str) -> str:
         """PyTorch ParameterDict keys cannot contain '.'."""
-        return node_id.replace(".", "_dot_")
+        if node_id in self._id_map:
+            return self._id_map[node_id]
+        import hashlib
+        safe = "n_" + hashlib.md5(node_id.encode()).hexdigest()[:16]
+        self._id_map[node_id] = safe
+        self._safe_map[safe] = node_id
+        return safe
 
     def _original_id(self, safe_id: str) -> str:
-        return safe_id.replace("_dot_", ".")
+        return self._safe_map.get(safe_id, safe_id)
 
     def define_persona(self, persona_name: str, node_ids: List[str]):
         """
@@ -95,6 +104,12 @@ class LiquidGraph(nn.Module):
         return mask
 
     def add_node(self, node_id: str, seed_embedding: torch.Tensor, connections: Optional[List[str]] = None):
+        if not isinstance(seed_embedding, torch.Tensor):
+            raise TypeError("seed_embedding must be a torch.Tensor")
+        if seed_embedding.shape != (self.hidden_dim,):
+            raise ValueError(f"Expected embedding shape ({self.hidden_dim},), got {seed_embedding.shape}")
+        seed_embedding = seed_embedding.to(dtype=torch.float32)
+
         safe_id = self._safe_id(node_id)
         if safe_id in self.nodes:
             logger.warning(f"[LGNN] Node {node_id} already exists. Updating embedding.")
@@ -119,6 +134,8 @@ class LiquidGraph(nn.Module):
                 if node_id in self.personas[p_name]:
                     self.personas[p_name].remove(node_id)
             logger.info(f"[LGNN] Severed node: '{node_id}'.")
+            del self._id_map[node_id]
+            del self._safe_map[safe_id]
 
     def forward(self, t, latent_states: torch.Tensor) -> torch.Tensor:
         # Stabilize ODE gradients

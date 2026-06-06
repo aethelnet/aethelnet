@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import torch
+import os
 from fastapi import FastAPI, WebSocket
 from typing import Dict, Any, List
 
@@ -17,6 +18,7 @@ class AethelEngine:
         self.graph = LiquidGraph(hidden_dim=hidden_dim)
         self.is_running = False
         self.connected_clients: List[WebSocket] = []
+        self.graph_lock = asyncio.Lock()
 
     async def ignition_loop(self, tick_interval: float = 1.0):
         """
@@ -30,7 +32,8 @@ class AethelEngine:
             try:
                 # Evolve topology through Neural ODEs asynchronously to prevent blocking the event loop
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, lambda: self.graph.evolve_topology(compute_time=1.0))
+                async with self.graph_lock:
+                    await loop.run_in_executor(None, lambda: self.graph.evolve_topology(compute_time=1.0))
                 
                 # Broadcast the new state to all connected swarm clients
                 await self.broadcast_state()
@@ -47,11 +50,12 @@ class AethelEngine:
         if not self.connected_clients:
             return
             
-        nodes_data = [{"id": n} for n in self.graph.nx_graph.nodes()]
-        links_data = [
-            {"source": u, "target": v, "weight": float(d.get("weight", 0.0))}
-            for u, v, d in self.graph.nx_graph.edges(data=True)
-        ]
+        async with self.graph_lock:
+            nodes_data = [{"id": n} for n in self.graph.nx_graph.nodes()]
+            links_data = [
+                {"source": u, "target": v, "weight": float(d.get("weight", 0.0))}
+                for u, v, d in self.graph.nx_graph.edges(data=True)
+            ]
 
         state_summary = {
             "type": "network_layout",
@@ -104,22 +108,28 @@ async def swarm_endpoint(websocket: WebSocket):
             # Here we would merge remote tensors from the Swarm
             pass
     except Exception:
-        engine.connected_clients.remove(websocket)
+        if websocket in engine.connected_clients:
+            engine.connected_clients.remove(websocket)
 
 from fastapi import Security, HTTPException
 from fastapi.security import APIKeyHeader
 
 api_key_header = APIKeyHeader(name="X-Auth-Token")
 
+AUTH_TOKEN = os.environ.get("AETHELNET_AUTH_TOKEN")
+if not AUTH_TOKEN:
+    raise RuntimeError("AETHELNET_AUTH_TOKEN environment variable is required")
+
 @app.post("/api/inject")
 async def inject_node(node_id: str, api_key: str = Security(api_key_header)):
     """
     Inject a new concept into the graph.
     """
-    if api_key != "13Menschen!A":
+    if api_key != AUTH_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
         
-    seed_emb = torch.randn(engine.graph.hidden_dim)
-    seed_emb = seed_emb / (seed_emb.norm() + 1e-8)
-    engine.graph.add_node(node_id, seed_emb)
+    async with engine.graph_lock:
+        seed_emb = torch.randn(engine.graph.hidden_dim)
+        seed_emb = seed_emb / (seed_emb.norm() + 1e-8)
+        engine.graph.add_node(node_id, seed_emb)
     return {"status": "injected", "node_id": node_id}
