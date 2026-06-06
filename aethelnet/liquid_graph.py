@@ -104,8 +104,7 @@ class LiquidGraph(nn.Module):
         
         if connections:
             for target in connections:
-                # We check safe_id for existence
-                if self._safe_id(target) in self.nodes:
+                if self.nx_graph.has_node(target):
                     self.nx_graph.add_edge(node_id, target, weight=1.0)
         
         logger.info(f"[LGNN] Spawned node: '{node_id}' with hidden dim {self.hidden_dim}.")
@@ -121,14 +120,15 @@ class LiquidGraph(nn.Module):
                     self.personas[p_name].remove(node_id)
             logger.info(f"[LGNN] Severed node: '{node_id}'.")
 
-    def forward(self, t, latent_states: torch.Tensor, quarantined_nodes: List[str] = None) -> torch.Tensor:
+    def forward(self, t, latent_states: torch.Tensor) -> torch.Tensor:
         # Stabilize ODE gradients
         latent_states = torch.nan_to_num(latent_states, nan=0.0, posinf=1.0, neginf=-1.0)
         
         # Get active node mask
         safe_ids = list(self.nodes.keys())
         node_ids = [self._original_id(sid) for sid in safe_ids]
-        mask = self.get_node_mask(node_ids, latent_states.device, quarantined_nodes=quarantined_nodes)
+        q_nodes = getattr(self, "current_quarantined_nodes", None)
+        mask = self.get_node_mask(node_ids, latent_states.device, quarantined_nodes=q_nodes)
         
         # Apply mask to node states
         masked_states = latent_states * mask
@@ -137,7 +137,6 @@ class LiquidGraph(nn.Module):
         local_flow = self.flow_dynamics(masked_states) - self.decay_rate * masked_states
         
         # 2. Relational attention flow
-        # Instead of building adj_matrix here, we use the precomputed one from kwargs
         adj_matrix = getattr(self, "cached_adj_matrix", None)
         if adj_matrix is None:
             num_nodes = latent_states.size(0)
@@ -169,28 +168,20 @@ class LiquidGraph(nn.Module):
         # Precompute sparse adjacency matrix (PolarQuant Style Sparsity)
         import networkx as nx
         adj_matrix = torch.tensor(nx.to_numpy_array(self.nx_graph, nodelist=node_ids), dtype=torch.float32)
-        
-        # Sparsity Mask: Only keep top-k strongest connections per node (simulates polar quantum masking)
-        k = min(3, len(node_ids))
-        if k > 0:
-            topk_vals, _ = torch.topk(adj_matrix, k, dim=1)
-            threshold = topk_vals[:, -1].unsqueeze(1)
-            adj_matrix = torch.where(adj_matrix >= threshold, adj_matrix, torch.tensor(0.0))
             
         self.cached_adj_matrix = adj_matrix.to(initial_states.device)
-        
-        # Override forward to pass quarantined_nodes
-        original_forward = self.forward
-        self.forward = lambda t, x, **kwargs: original_forward(t, x, quarantined_nodes=quarantined_nodes)
+        self.current_quarantined_nodes = quarantined_nodes
         
         # Solve the ODE (and time its execution)
         t_span = torch.tensor([0.0, compute_time])
         t0 = time.perf_counter()
-        refined_states = odeint(self, initial_states, t_span, method='rk4', options={'step_size': 0.1})[-1]
-        refined_states = torch.nan_to_num(refined_states, nan=0.0, posinf=1.0, neginf=-1.0)
         
-        # Restore forward
-        self.forward = original_forward
+        try:
+            refined_states = odeint(self, initial_states, t_span, method='rk4', options={'step_size': 0.1})[-1]
+            refined_states = torch.nan_to_num(refined_states, nan=0.0, posinf=1.0, neginf=-1.0)
+        finally:
+            self.current_quarantined_nodes = None
+            self.cached_adj_matrix = None
         duration = time.perf_counter() - t0
         
         # Calculate speed anchor: how many virtual seconds we compute per physical second
