@@ -153,25 +153,20 @@ class LiquidGraph(nn.Module):
         # 1. Local flow dynamics
         local_flow = self.flow_dynamics(masked_states) - self.decay_rate * masked_states
         
-        # 2. Relational attention flow
+        # 2. Relational flow using Sparse Tensors!
         adj_matrix = getattr(self, "cached_adj_matrix", None)
         if adj_matrix is None:
             num_nodes = latent_states.size(0)
-            adj_matrix = torch.eye(num_nodes, device=latent_states.device)
+            indices = torch.arange(num_nodes, device=latent_states.device).unsqueeze(0).repeat(2, 1)
+            values = torch.ones(num_nodes, device=latent_states.device)
+            adj_matrix = torch.sparse_coo_tensor(indices, values, size=(num_nodes, num_nodes)).coalesce()
 
-        # Compute Multihead Attention
-        query = masked_states.unsqueeze(0) # [1, num_nodes, hidden_dim]
-        attn_mask = (adj_matrix == 0.0)
-        attn_mask.fill_diagonal_(False) # Always allow self-attention to prevent softmax(NaN) crashes
-        attn_output, _ = self.resonance_aligner(query, query, query, attn_mask=attn_mask)
-        attn_output = attn_output.squeeze(0) # [num_nodes, hidden_dim]
-        
-        # Mask the attention output as well
-        attn_output = attn_output * mask
-        relational_flow = torch.matmul(adj_matrix, attn_output)
+        # Efficient Sparse-Dense Matrix Multiplication (Graph Convolution)
+        # We skip the heavy MultiheadAttention to achieve pure Sparse Tensor speed
+        relational_flow = torch.sparse.mm(adj_matrix, masked_states)
         
         # Combined gradient: dx/dt
-        grad = (local_flow + relational_flow) * mask
+        grad = (local_flow + relational_flow * 0.1) * mask
         return torch.nan_to_num(grad, nan=0.0, posinf=1.0, neginf=-1.0)
 
     def evolve_topology(self, compute_time: float = 1.0, quarantined_nodes: List[str] = None):
@@ -182,14 +177,23 @@ class LiquidGraph(nn.Module):
         node_ids = [self._original_id(sid) for sid in safe_ids]
         initial_states = torch.stack([self.nodes[sid] for sid in safe_ids])
         
-        # Precompute sparse adjacency matrix (PolarQuant Style Sparsity)
-        import networkx as nx
-        adj_matrix = torch.tensor(nx.to_numpy_array(self.nx_graph, nodelist=node_ids), dtype=torch.float32)
+        # Build Sparse COO Tensor from NetworkX
+        import scipy.sparse as sp
+        import numpy as np
+        
+        if len(self.nx_graph.edges) > 0:
+            adj_scipy = nx.to_scipy_sparse_array(self.nx_graph, nodelist=node_ids, format="coo", weight="weight")
+            indices = torch.tensor(np.vstack((adj_scipy.row, adj_scipy.col)), dtype=torch.long)
+            values = torch.tensor(adj_scipy.data, dtype=torch.float32)
+            adj_matrix = torch.sparse_coo_tensor(indices, values, size=adj_scipy.shape).coalesce()
+        else:
+            num_nodes = len(node_ids)
+            adj_matrix = torch.sparse_coo_tensor(torch.empty((2, 0), dtype=torch.long), torch.empty(0), size=(num_nodes, num_nodes)).coalesce()
             
         self.cached_adj_matrix = adj_matrix.to(initial_states.device)
         self.current_quarantined_nodes = quarantined_nodes
         
-        # Solve the ODE (and time its execution)
+        # Solve the ODE
         t_span = torch.tensor([0.0, compute_time])
         t0 = time.perf_counter()
         
@@ -201,7 +205,6 @@ class LiquidGraph(nn.Module):
             self.cached_adj_matrix = None
         duration = time.perf_counter() - t0
         
-        # Calculate speed anchor: how many virtual seconds we compute per physical second
         self.hardware_speed_factor = compute_time / (duration + 1e-8)
         logger.info(f"[LGNN] Evolved topology. Wall-clock: {duration:.4f}s | Virtual: {compute_time}s | Speed Factor: {self.hardware_speed_factor:.2f}x")
         
@@ -210,35 +213,45 @@ class LiquidGraph(nn.Module):
             for i, sid in enumerate(safe_ids):
                 self.nodes[sid].copy_(refined_states[i])
                 
-        # --- Hebbian Edge Evolution ---
+        # --- Fast Vectorized Hebbian Edge Evolution ---
         normalized_states = refined_states / (refined_states.norm(dim=-1, keepdim=True) + 1e-8)
         similarity_matrix = torch.matmul(normalized_states, normalized_states.T)
         
-        # Get active node mask to prevent dormant nodes from updating edges
-        mask = self.get_node_mask(node_ids, refined_states.device, quarantined_nodes=quarantined_nodes).squeeze(1).tolist()
+        mask = self.get_node_mask(node_ids, refined_states.device, quarantined_nodes=quarantined_nodes).squeeze(1)
+        valid_mask = torch.outer(mask, mask)
+        valid_mask.fill_diagonal_(0.0) # No self-edges
         
-        for i in range(len(node_ids)):
-            for j in range(i + 1, len(node_ids)):
-                # Skip edge updates if either node is masked/dormant
-                if mask[i] == 0.0 or mask[j] == 0.0:
-                    continue
-                    
-                u, v = node_ids[i], node_ids[j]
-                similarity = float(similarity_matrix[i, j].detach().cpu())
+        similarity_matrix = similarity_matrix * valid_mask
+        
+        # Fast bulk operations instead of O(N^2) python loop
+        high_sim_indices = torch.nonzero(similarity_matrix >= self.resonance_threshold, as_tuple=False)
+        high_sim_indices = high_sim_indices[high_sim_indices[:, 0] < high_sim_indices[:, 1]] # Undirected
+        
+        for idx in range(high_sim_indices.size(0)):
+            i, j = high_sim_indices[idx].tolist()
+            u, v = node_ids[i], node_ids[j]
+            similarity = float(similarity_matrix[i, j].item())
+            if self.nx_graph.has_edge(u, v):
+                current_weight = self.nx_graph[u][v].get('weight', 1.0)
+                self.nx_graph[u][v]['weight'] = min(current_weight + 0.1, 1.0)
+            else:
+                self.nx_graph.add_edge(u, v, weight=0.5)
+                logger.info(f"[LGNN] Spawned bridge '{u}' <-> '{v}' (Sim: {similarity:.2f})")
                 
-                if similarity >= self.resonance_threshold:
-                    if self.nx_graph.has_edge(u, v):
-                        current_weight = self.nx_graph[u][v].get('weight', 1.0)
-                        self.nx_graph[u][v]['weight'] = min(current_weight + 0.1, 1.0)
-                    else:
-                        self.nx_graph.add_edge(u, v, weight=0.5)
-                        logger.info(f"[LGNN] Spawned bridge between '{u}' and '{v}' (Similarity: {similarity:.2f}).")
+        # Fast bulk decay of existing edges
+        edges = list(self.nx_graph.edges(data=True))
+        node_id_to_idx = {nid: idx for idx, nid in enumerate(node_ids)}
+        
+        for u, v, data in edges:
+            if u not in node_id_to_idx or v not in node_id_to_idx:
+                continue
+            i, j = node_id_to_idx[u], node_id_to_idx[v]
+            if mask[i] == 0.0 or mask[j] == 0.0:
+                continue
+            if similarity_matrix[i, j] < self.resonance_threshold:
+                current_weight = data.get('weight', 1.0)
+                new_weight = current_weight - 0.05
+                if new_weight <= 0.0:
+                    self.nx_graph.remove_edge(u, v)
                 else:
-                    if self.nx_graph.has_edge(u, v):
-                        current_weight = self.nx_graph[u][v].get('weight', 1.0)
-                        new_weight = current_weight - 0.05
-                        if new_weight <= 0.0:
-                            self.nx_graph.remove_edge(u, v)
-                            logger.info(f"[LGNN] Pruned bridge between '{u}' and '{v}' due to concept decay.")
-                        else:
-                            self.nx_graph[u][v]['weight'] = new_weight
+                    self.nx_graph[u][v]['weight'] = new_weight
