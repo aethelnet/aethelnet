@@ -14,9 +14,6 @@ The Aethelnet project is a micro-service architecture designed to scale horizont
 *   **`aethelnet-node`**
     The execution and API layer. Exposes the core graph state via a FastAPI backend. Designed for high-throughput concurrency, it utilizes a PostgreSQL `SKIP LOCKED` asynchronous queue to prevent database deadlocks during massive data ingestion. Inter-node synchronization is handled via a compressed MsgPack binary protocol to maximize bandwidth efficiency.
     
-*   **`auratic-systems-prime`**
-    The orchestration and ingestion layer. Features autonomous crawling agents that format unstructured data for the node's `universal_ingest` endpoint. It includes the continuous background loop that evaluates node confidence metrics and resolves topological plateaus through automated web verification.
-    
 *   **`aethelnet-unit`**
     The frontend visualization module. A lightweight, vanilla JavaScript monitor utilizing WebGL/Canvas to render the high-dimensional state, network topology, and node confidence metrics of a local LGNN instance in real time.
 
