@@ -1,48 +1,29 @@
-# Aethelnet
+### Hi there
 
-**A Continuous Liquid Graph Neural Network for Decentralized Execution**
+I build distributed, continuous-time artificial intelligence architectures. My primary research and engineering focus is **LGNN (Liquid Graph Neural Networks)** -- an approach that replaces massive, static parameter matrices with dynamic, physics-informed graph topologies governed by ordinary differential equations (ODEs).
 
-Aethelnet is an experimental neural architecture built on continuous Ordinary Differential Equations (ODEs) and dynamic topology (Liquid GNNs). Instead of a rigid, feed-forward matrix, Aethelnet models knowledge as a fluid, physics-informed graph where nodes ("Grains of Truth") and edges ("Synapses") decay, grow, and vibrate over time.
+---
 
-## 🧠 Core Architecture Highlights
+### The Aethelnet Ecosystem
 
-*   **Physics-Informed Node Dynamics:** The graph isn't static. It uses a `ContinuousForge` that applies thermodynamic-like decay and Hebbian learning. Edges that fire together wire together, while idle pathways naturally decay over continuous time.
-*   **P2P "Persona" Syncing:** The network implements a decentralized Mesh Gossip protocol (`p2p_sync.py`). Nodes periodically hunt for their peers' strongest signals (the highest-momentum subnetworks) and ingest them as isolated "Personas". This allows different execution nodes to share learned topological structures without needing centralized gradient syncing.
-*   **Decoupled Reality Anchors:** The core is agnostic to its data source. It processes purely mathematical "truth" embeddings, allowing it to be mapped to financial data, language modeling, or arbitrary data streams by injecting external "Reality Anchors".
+The Aethelnet project is a micro-service architecture designed to scale horizontally across decentralized P2P environments. The ecosystem is split into four core repositories:
 
-## 🚀 Usage Flows
+*   **`aethelnet-core`**
+    The mathematical engine. A continuous ODE graph solver (`torchdiffeq`) that applies thermodynamic decay and Hebbian learning to multi-dimensional embeddings. It solves the traditional O(N^2) memory bottleneck of graph neural networks by using Stochastic Neighborhood Sharding, maintaining an O(1) RAM footprint during matrix multiplication.
+    
+*   **`aethelnet-node`**
+    The execution and API layer. Exposes the core graph state via a FastAPI backend. Designed for high-throughput concurrency, it utilizes a PostgreSQL `SKIP LOCKED` asynchronous queue to prevent database deadlocks during massive data ingestion. Inter-node synchronization is handled via a compressed MsgPack binary protocol to maximize bandwidth efficiency.
+    
+*   **`auratic-systems-prime`**
+    The orchestration and ingestion layer. Features autonomous crawling agents that format unstructured data for the node's `universal_ingest` endpoint. It includes the continuous background loop that evaluates node confidence metrics and resolves topological plateaus through automated web verification.
+    
+*   **`aethelnet-unit`**
+    The frontend visualization module. A lightweight, vanilla JavaScript monitor utilizing WebGL/Canvas to render the high-dimensional state, network topology, and node confidence metrics of a local LGNN instance in real time.
 
-You can run Aethelnet in different modes depending on whether you want to simulate the physics engine locally, or run a decentralized mesh node.
+---
 
-### 1. Run the Local ODE Simulation (The Forge)
-Watch the graph topology evolve in real-time. This command spins up the Liquid GNN, creates a baseline structure, and applies continuous ODE dampening and excitation.
-```bash
-python3 scripts/run_simulation.py
-```
+### Architectural Philosophy
 
-### 2. Start a Mesh Node (Decentralized Server)
-Start the FastAPI backend to expose your node's graph state to the mesh. Other nodes will be able to query your `/p2p/expertise` endpoint to ingest your strongest topological structures.
-```bash
-python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
-```
+> "Edges that fire together wire together, while idle pathways naturally decay over continuous time."
 
-### 3. Connect the CLI Diagnostics
-If a mesh node is running, you can connect the command-line interface to read its current "Mind State", inspect edge weights, and view active Personas.
-```bash
-python3 cli/lgnn_cli.py --connect http://localhost:8000 --status
-```
-
-## 🛠 Installation
-
-Requirements: Python 3.9+
-
-```bash
-git clone https://github.com/aethelnet/aethelnet.git
-cd aethelnet
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 🤝 Philosophy
-Aethelnet moves away from massive, static parameter matrices towards smaller, highly dynamic graphs that *live* in continuous time. We believe the next step in generalized architectures relies on nodes that communicate via physical rules rather than arbitrary backward passes.
+Aethelnet operates on the premise that the next step in generalized architectures relies on nodes interacting via physical rules rather than arbitrary backpropagation. In this paradigm, "truth" is not a centralized pre-trained weight, but rather an emergent property derived from the topological consensus and resonance of the graph over time.
